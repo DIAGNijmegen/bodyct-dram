@@ -9,14 +9,12 @@ RELOAD_CHECKPOINT_PATH = None
 
 RELOAD_DICT_LIST = ["model"]
 
-DB_PATH = "/mnt/netcache/bodyct/experiments/0-copdgene-multiframe-dicom/COPDGene/"
-CHUNK_DB_PATH = "/mnt/netcache/bodyct/experiments/emphysema_subtyping_t8610/patch_data/"
-
-TEST_CSV = r"/mnt/netcache/bodyct/experiments/emphysema_subtyping_t8610/steve/te.csv"
-TRAIN_CSV = r"/mnt/netcache/bodyct/experiments/emphysema_subtyping_t8610/steve/tr.csv"
-VALID_CSV = r"/mnt/netcache/bodyct/experiments/emphysema_subtyping_t8610/steve/val.csv"
-DEBUG_PATH = "/mnt/netcache/bodyct/experiments/emphysema_subtyping_t8610/dram_test_cases/"
-MODEL_ROOT_PATH = "/mnt/netcache/bodyct/experiments/emphysema_subtyping_t8610/dram_models/"
+DB_PATH = "/mnt/netcache/bodyct/experiments/covid_lesion_wsss_t9195/"
+TEST_CSV = "/mnt/netcache/bodyct/experiments/covid_lesion_wsss_t9195/test.csv"
+TRAIN_CSV = "/mnt/netcache/bodyct/experiments/covid_lesion_wsss_t9195/wss_train.csv"
+VALID_CSV = "/mnt/netcache/bodyct/experiments/covid_lesion_wsss_t9195/val.csv"
+DEBUG_PATH = "/mnt/netcache/bodyct/experiments/covid_lesion_wsss_t9195/test_cases/"
+MODEL_ROOT_PATH = "/mnt/netcache/bodyct/experiments/covid_lesion_wsss_t9195/models/"
 
 JOB_RUNNER_CLS = "job_runner.LesionSegChunkTrain"
 TEST_JOB_RUNNER_CLS = "job_runner.LesionSegTest"
@@ -41,7 +39,7 @@ TRAIN_BATCH_SIZE = 10
 RESAMPLE_SPACING = 1.0
 TEST_RESAMPLE_SPACING = 1.0
 RESAMPLE_SIZE = (80, 80, 80)
-LOSS_FACTORS = [1.0, 1.0, 0.5, 0.5]
+LOSS_FACTORS = [2.0, 1.0, 0.5, 0.5]
 
 RELABEL_MAPPING = {}
 LABEL_NAME_MAPPING = {0: 'background',
