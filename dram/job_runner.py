@@ -620,9 +620,9 @@ class LesionSegChunkTrain(JobRunner):
 
     def reset_data(self):
         self.logger.info("************Here we are at LesionSegCTSSLobeChunkTrain reset data schedule!**************")
-        tr_uids = COPDGeneSubtypingLobeChunk.get_series_uids_unique_scans(self.settings.CHUNK_DB_PATH + '/memo.csv')
+        tr_uids = RadboudCOVIDLobeVesselChunk.get_series_uids(self.settings.DB_PATH + '/memo.csv')
 
-        tr_dataset = COPDGeneSubtypingLobeChunk(self.settings.CHUNK_DB_PATH,
+        tr_dataset = RadboudCOVIDLobeVesselChunk(self.settings.DB_PATH,
                                                 tr_uids,
                                                 transforms=self.get_data_transforms(True))
 
@@ -639,7 +639,7 @@ class LesionSegChunkTrain(JobRunner):
                                     num_workers=self.settings.NUM_WORKERS)
         self.logger.info("Train steps {}.".format(len(self.tr_loader)))
         self.num_steps = len(self.tr_loader)
-        self.val_dataset = COPDGeneSubtyping(self.settings.DB_PATH,
+        self.val_dataset = RadboudCOVID(self.settings.DB_PATH,
                                              COPDGeneSubtyping.get_series_uids(self.settings.VALID_CSV),
                                              transforms=self.get_data_transforms(False),
                                              keep_sorted=True)
@@ -657,8 +657,7 @@ class LesionSegChunkTrain(JobRunner):
             with torch.set_grad_enabled(True):
                 images = batch_data["#image"].float().cuda().unsqueeze(1)
                 lobes = batch_data["#lobe_reference"].float().cuda().unsqueeze(1)
-
-                lesions = batch_data["#lesion_reference"].float().cuda().unsqueeze(1)
+                lesions = batch_data["#pseudo_lesion_reference"].float().cuda().unsqueeze(1)
                 ctss = batch_data["meta"]["cle"]
                 metas = batch_data['meta']
                 self.optimizer.zero_grad()
@@ -722,7 +721,6 @@ class LesionSegChunkTrain(JobRunner):
         scan = scan_data['#image']
         metadata = scan_data['meta']
         lobe = scan_data['#lobe_reference']
-        lesion = scan_data['#lesion_reference']
         uid = metadata['uid']
         now = time.time()
         epoch_debug_path = os.path.join(self.debug_path, str(self.epoch_n))
@@ -773,22 +771,6 @@ class LesionSegChunkTrain(JobRunner):
             scan_cls_target = int(float(metadata["cle"]))
             pred_lesion_ratio = (htp * (lobe > 0)).sum() / (lobe > 0).sum()
             reg_cls_pred = self.loss_func.ratio_to_label([pred_lesion_ratio])[0]
-            # resample and compute metrics
-            original_spacing = np.asarray(metadata['original_spacing']).flatten().tolist()
-            original_size = np.asarray(metadata['original_size']).flatten().tolist()
-            spacing = np.asarray(metadata['spacing']).flatten().tolist()
-            lesion, _ = resample(lesion, spacing, factor=2, required_spacing=original_spacing,
-                                 new_size=original_size, interpolator='nearest')
-            scan, _ = resample(scan, spacing, factor=2, required_spacing=original_spacing,
-                               new_size=original_size, interpolator='linear')
-            htp, _ = resample(htp, spacing, factor=2, required_spacing=original_spacing,
-                              new_size=original_size, interpolator='linear')
-            draw_mask_tile_singleview_heatmap(windowing(scan, from_span=(-1000, -700)).astype(np.uint8),
-                                              [[(lesion * 255).astype(np.uint8)],
-                                               [windowing(htp, from_span=(0, 1)).astype(np.uint8)]],
-                                              np.logical_or(htp > 0.5, lesion > 0) > 0, 5,
-                                              epoch_debug_path + f'/{uid}/',
-                                              titles=["lesion", "pred_cam"])
 
             self.logger.info(f"val scan {uid}, "
                              f", reg_cls_pred: {reg_cls_pred}, scan_cls_target: {scan_cls_target}.")
@@ -831,25 +813,30 @@ class LesionSegChunkTrain(JobRunner):
 
 class LesionSegTest(JobRunner):
 
-    def __init__(self, input_image_path, input_lobe_path, output_path, settings_module, ckp_path):
+    def __init__(self, settings_module=None, scan_path=None
+                 , output_path=None, task_name='test'):
         super(LesionSegTest, self).__init__(None, settings_module)
-        self.scan_path = input_image_path
-        self.lobe_path = input_lobe_path
+
+        self.scan_path = scan_path
+        self.settings_module = settings_module
         self.output_path = output_path
-        self.ckp_path = ckp_path
-        if output_path is not None and (not os.path.exists(output_path)):
-            os.makedirs(output_path)
-        self.val_dataset = TestDataset(self.scan_path,
-                                       self.lobe_path,
-                                       transforms=self.get_data_transforms(),
-                                       keep_sorted=True)
+        self.task_name = task_name
+        resample_size = self.settings.RESAMPLE_SIZE
+        test_spacing = self.settings.TEST_RESAMPLE_SPACING
+
+        self.test_set = RadboudCOVID(self.settings.DB_PATH, RadboudCOVID.get_series_uids(self.settings.TEST_CSV),
+                                     task=task_name, keep_sorted=True,
+                                     transforms=transforms.Compose([
+                                         Resample(mode="fixed_spacing",
+                                                  factor=test_spacing,
+                                                  size=resample_size
+                                                  ),
+
+                                     ]))
+
         self.settings.RELOAD_CHECKPOINT = True
-        self.settings.RELOAD_CHECKPOINT_PATH = self.ckp_path
         self.init()
         self.reload_model_from_cache()
-
-    def post_preprocessing(self):
-        return [ToTensor(), RemoveMeta()]
 
     def preprocessing(self):
         window_max = self.settings.WINDOWING_MAX
@@ -861,122 +848,221 @@ class LesionSegTest(JobRunner):
                 Resample(mode=resample_mode,
                          factor=resample_spacing,
                          size=resample_size
-                         ),
+                         )
                 ]
 
-    def val_preprocessing(self):
-        resample_spacing = self.settings.RESAMPLE_SPACING
-        resample_size = self.settings.RESAMPLE_SIZE
-        return [
-            Resample(mode='fixed_spacing',
-                     factor=resample_spacing,
-                     size=resample_size
-                     )
-        ]
+    def post_preprocessing(self):
+        return [ToTensor()]
 
-    def get_data_transforms(self):
-        data_transforms = transforms.Compose(self.val_preprocessing())
-        return data_transforms
+    def archive_results(self, scan, lobe, heatmap, pred, post_pred, ref, meta):
+        output_path = os.path.join(self.output_path, self.task_name)
+        post_path = os.path.join(output_path, "post")
+        if not os.path.exists(post_path):
+            os.makedirs(post_path)
 
-    def evaluate_scan(self, scan_data):
-        scan = scan_data['#image']
-        metadata = scan_data['meta']
-        lobe = scan_data['#lobe_reference']
-        uid = metadata['uid']
-        htp = np.zeros(scan.shape, dtype=np.float32)
-        now = time.time()
-        for lobe_label in np.unique(lobe)[1:]:
-            lobe_binary = (lobe == lobe_label)
-            lobe_crop_slices = find_crops(lobe_binary, metadata["spacing"], 5)
-            lobe_chunk = lobe_binary[lobe_crop_slices]
-            scan_chunk = copy.deepcopy(scan[lobe_crop_slices])
-            crop_size = lobe_chunk.shape
-            scan_chunk[lobe_chunk == 0] = -2048
-            ret = {
-                    "#image": scan_chunk.astype(np.int16),
-                    "#lobe_reference": lobe_chunk.astype(np.uint8),
-                    "meta":
-                        {
-                            "size": scan_chunk.shape,
-                            "spacing": metadata['spacing'],
-                            'original_spacing': metadata['spacing'],
-                            'original_size': scan_chunk.shape,
-                            "origin": metadata['origin'],
-                            "direction": metadata['direction'],
-                        }
-            }
-            t_ret = transforms.Compose(self.preprocessing() + self.post_preprocessing())(ret)
-            t_scan_chunk = expand_dims(t_ret["#image"], 5).float().cuda()
-            t_lobe_chunk = expand_dims(t_ret["#lobe_reference"], 5).float().cuda()
-            _, dense_outs = self.model(t_scan_chunk, t_lobe_chunk)
-            probs = F.sigmoid(dense_outs)
-            probs = squeeze_dims(F.interpolate(probs, size=crop_size, mode='trilinear',
-                                                   align_corners=True), 3).cpu().numpy()
-            dense_lobe_mask = ret["#lobe_reference"] > 0
-            htp[lobe_crop_slices][dense_lobe_mask] = probs[
-                    dense_lobe_mask]
-        pred_lesion_ratio = (htp * (lobe > 0)).sum() / (lobe > 0).sum()
-        reg_cls_pred = self.loss_func.ratio_to_label([pred_lesion_ratio])[0]
+        heatmap_path = os.path.join(output_path, "heatmap")
+        if not os.path.exists(heatmap_path):
+            os.makedirs(heatmap_path)
 
-        original_spacing = np.asarray(metadata['original_spacing']).flatten().tolist()
-        original_size = np.asarray(metadata['original_size']).flatten().tolist()
-        spacing = np.asarray(metadata['spacing']).flatten().tolist()
-        scan, _ = resample(scan, spacing, factor=2, required_spacing=original_spacing,
-                               new_size=original_size, interpolator='linear')
-        htp, _ = resample(htp, spacing, factor=2, required_spacing=original_spacing,
-                              new_size=original_size, interpolator='linear')
-        end = time.time()
-        elapse = end - now
-        draw_mask_tile_singleview_heatmap(windowing(scan, from_span=(-1000, -700)).astype(np.uint8),
-                                              [[windowing(htp, from_span=(0, 1)).astype(np.uint8)]],
-                                              htp > 0.3, 5,
-                                              self.output_path + f'/{uid}/',
-                                              titles=["pred_cam"])
-        htpw = windowing(htp, from_span=(0, 1)).astype(np.uint8)
-        write_array_to_mha_itk(self.output_path, [htpw],
-                                   [uid], type=np.uint8,
-                                   origin=metadata["origin"][::-1],
-                                   direction=np.asarray(metadata["direction"]).reshape(3, 3)[
-                                             ::-1].flatten().tolist(),
-                                   spacing=metadata["original_spacing"][::-1])
-        self.logger.info(f"val scan {uid}, "
-                             f",reg_cls_pred: {reg_cls_pred}.")
+        screenshots_path = os.path.join(output_path, "screenshots")
+        if not os.path.exists(screenshots_path):
+            os.makedirs(screenshots_path)
+        series_uid = meta['uid']
+        heatmap_w = windowing(heatmap, from_span=(0, 1)).astype(np.uint8)
+        # label_name_mapping = self.settings.LABEL_NAME_MAPPING
+        write_array_to_mha_itk(output_path, [pred.astype(np.uint8)],
+                               [series_uid], type=np.uint8,
+                               origin=meta["origin"][::-1],
+                               direction=np.asarray(meta["direction"]).reshape(3, 3)[
+                                         ::-1].flatten().tolist(),
+                               spacing=meta["original_spacing"][::-1])
+        write_array_to_mha_itk(heatmap_path, [heatmap_w.astype(np.uint8)],
+                               [series_uid], type=np.uint8,
+                               origin=meta["origin"][::-1],
+                               direction=np.asarray(meta["direction"]).reshape(3, 3)[
+                                         ::-1].flatten().tolist(),
+                               spacing=meta["original_spacing"][::-1])
 
-        return reg_cls_pred, pred_lesion_ratio, elapse
+        write_array_to_mha_itk(post_path, [post_pred.astype(np.uint8)],
+                               [series_uid], type=np.uint8,
+                               origin=meta["origin"][::-1],
+                               direction=np.asarray(meta["direction"]).reshape(3, 3)[
+                                         ::-1].flatten().tolist(),
+                               spacing=meta["original_spacing"][::-1])
+
+        labels = np.unique(ref)
+        self.logger.debug("archive results generate screenshots with unique labels {} in prediction."
+                          .format(labels))
+
+        draw_mask_tile_singleview_heatmap(windowing(scan).astype(np.uint8),
+                                          [[(pred * 255).astype(np.uint8)],
+                                           [(post_pred * 255).astype(np.uint8)],
+                                           [(ref * 255).astype(np.uint8)],
+                                           [windowing(heatmap, from_span=(0, 1)).astype(np.uint8)]],
+                                          np.logical_or(pred > 0, ref > 0) > 0, 5,
+                                          screenshots_path + f'/{series_uid}/',
+                                          titles=["pred_lesion", "pred_lesion_post", "lesion", "pred_cam"])
 
     def run(self):
-        self.logger.info(f"total {len(self.val_dataset)} files to be processed from {self.scan_path}.")
+        self.logger.info(f"total {len(self.test_set)} files to be processed from {self.scan_path}.")
         self.model.eval()
-        self.logger.info(
-            "\r\n************we validate {} scans.**************\r\n"
-                .format(len(self.val_dataset)))
+        if self.output_path is None:
+            epoch_n = self.saved_model_states['epoch']
+            current_iteration = self.saved_model_states['iteration']
+            metrics = self.saved_model_states['metrics']
+            self.output_path = os.path.join(self.exp_path, "{:d}_{:d}_{:.5f}"
+                                            .format(epoch_n,
+                                                    current_iteration, metrics["val_iou"]))
 
-        results = []
-        with torch.no_grad():
-            for scan_idx, data in enumerate(self.val_dataset):
-                error_messages = []
-                metrics = {}
-                series_uid = data['meta']['uid']
-                elapse = 0
-                try:
-                    cls_reg_pred, pred_ratio, elapse = self.evaluate_scan(data)
-                except StopIteration:
-                    track = traceback.format_exc()
-                    error_msg = "Cannot process {} test scans with uid {}, {}.".format(scan_idx, series_uid, track)
-                    error_messages.append(error_msg)
-                finally:
-                    metrics['runtime_seconds'] = round(elapse, 1)
-                    metrics['severity_score'] = cls_reg_pred
-                    metrics['lesion_percentage_per_lung'] = pred_ratio
-                    results.append({
-                        'entity': series_uid,
-                        'metrics': metrics,
-                        'error_messages': error_messages
-                    })
+        output_path = os.path.join(self.output_path, self.task_name)
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+            with open(output_path + '/settings.txt', 'wt', newline='') as fp:
+                fp.write(str(self.settings))
+        uids = []
+        for uid in self.test_set.uids:
+            scan_path = output_path + '/{}.mha'.format(uid)
+            if os.path.exists(scan_path):
+                self.logger.warn("We have already archived results for scan {}".format(uid))
+            else:
+                self.logger.info("We add scan {} because {} does not exist.".format(uid, scan_path))
+                uids.append(uid)
+        if os.path.exists(output_path + '/records.csv'):
+            self.scan_records = pd.read_csv(output_path + '/records.csv')
+        else:
+            self.scan_records = pd.DataFrame(columns=['uid'])
+        self.test_set.uids = uids
+        self.logger.info("Start {} scans after exclusion."
+                         .format(len(self.test_set)))
+        average_time = 0
+        try:
+            scan_cls_preds = []
+            scan_cls_targets = []
+            with torch.no_grad():
+                for scan_idx, scan_data in enumerate(self.test_set):
+                    try:
+                        start = time.time()
+                        scan = scan_data['#image']
+                        metadata = scan_data['meta']
+                        lobe = scan_data['#lobe_reference']
+                        lesion = scan_data['#lesion_reference']
+                        vessel = scan_data['#vessel_reference']
+                        uid = metadata['uid']
+                        htp = np.zeros(scan.shape, dtype=np.float32)
+                        scan_accs = []
 
-            json_path = os.path.join(self.output_path, 'results.json')
-            with open(json_path, 'w') as f:
-                print('results:', results)
-                j = json.dumps(results)
-                f.write(j)
+                        for lobe_label in range(1, 6):
+                            lobe_binary = (lobe == lobe_label)
+                            cls_target = int(metadata['patient_meta'][self.test_set.metric_k_mapping[lobe_label]])
+                            if lobe_binary.sum() < 1e-7:
+                                scan_cls_preds.append(cls_target)
+                                scan_cls_targets.append(cls_target)
+                                continue
+                            lobe_crop_slices = find_crops(lobe_binary, metadata["spacing"],
+                                                          self.test_set.crop_border)
+                            lobe_chunk = lobe_binary[lobe_crop_slices]
+                            scan_chunk = copy.deepcopy(scan[lobe_crop_slices])
+                            crop_size = lobe_chunk.shape
+                            scan_chunk[lobe_chunk == 0] = -2048
+                            ret = {
+                                "#image": scan_chunk.astype(np.int16),
+                                "#lobe_reference": lobe_chunk.astype(np.uint8),
+                                "meta":
+                                    {
+                                        "size": scan_chunk.shape,
+                                        "spacing": metadata['spacing'],
+                                        'original_spacing': metadata['spacing'],
+                                        'original_size': scan_chunk.shape,
+                                        "original_origin": metadata['original_origin'],
+                                        "original_direction": metadata['original_direction'],
+                                        "origin": metadata['origin'],
+                                        "direction": metadata['direction'],
+                                    }
+                            }
+                            t_ret = transforms.Compose(self.preprocessing() + self.post_preprocessing())(ret)
+                            t_scan_chunk = expand_dims(t_ret["#image"], 5).float().cuda()
+                            t_lobe_chunk = expand_dims(t_ret["#lobe_reference"], 5).float().cuda()
+                            _, dense_outs = self.model(t_scan_chunk, t_lobe_chunk)
+                            pool_outs = self.model.pooling_dense_features(dense_outs, t_lobe_chunk)
+
+                            cls_pred = torch.max(pool_outs, dim=-1)[-1].item()
+                            scan_cls_preds.append(cls_pred)
+
+                            scan_cls_targets.append(cls_target)
+                            scan_accs.append(cls_pred == cls_target)
+                            dense_outs = F.interpolate(dense_outs, size=crop_size, mode='trilinear',
+                                                       align_corners=True).squeeze(0)
+                            dense_outs = F.relu(dense_outs)
+                            dense_out = dense_outs[cls_pred]
+                            dense_out = dense_out / dense_out.max()
+
+                            if cls_pred < 1e-7:
+                                dense_out.zero_()
+
+                            dense_lobe_mask = ret["#lobe_reference"] > 0
+                            htp[lobe_crop_slices][dense_lobe_mask] = dense_out.cpu().numpy()[
+                                dense_lobe_mask]
+
+                        max_norm_htp = htp
+
+                        _, th = binary_cam(max_norm_htp[lobe > 0])
+                        lesion_pred = max_norm_htp > th
+
+                        w_scan = windowing(scan, to_span=(0, 1))
+                        _, th = binary_cam(w_scan[lobe > 0], 0.75)
+                        lesion_pred_post = np.logical_and(np.logical_and(lesion_pred, w_scan > th),
+                                                          np.logical_not(vessel > 0)).astype(np.uint8)
+                        lesion_pred = lesion_pred.astype(np.uint8)
+                        # resample and compute metrics
+                        original_spacing = np.asarray(metadata['original_spacing']).flatten().tolist()
+                        original_size = np.asarray(metadata['original_size']).flatten().tolist()
+                        spacing = np.asarray(metadata['spacing']).flatten().tolist()
+                        lesion_pred, _ = resample(lesion_pred, spacing, factor=2, required_spacing=original_spacing,
+                                                  new_size=original_size, interpolator='nearest')
+                        lesion_pred_post, _ = resample(lesion_pred_post, spacing, factor=2,
+                                                       required_spacing=original_spacing,
+                                                       new_size=original_size, interpolator='nearest')
+                        lesion, _ = resample(lesion, spacing, factor=2, required_spacing=original_spacing,
+                                             new_size=original_size, interpolator='nearest')
+                        scan, _ = resample(scan, spacing, factor=2, required_spacing=original_spacing,
+                                           new_size=original_size, interpolator='linear')
+                        max_norm_htp, _ = resample(max_norm_htp, spacing, factor=2, required_spacing=original_spacing,
+                                                   new_size=original_size, interpolator='linear')
+                        m_iou = IOU(lesion_pred > 0, lesion > 0, 1e-5)
+                        m_iou_post = IOU(lesion_pred_post > 0, lesion > 0, 1e-5)
+                        m_acc = np.mean(scan_accs)
+                        m_dice = Dice(lesion_pred > 0, lesion > 0, 1e-5)
+                        m_dice_post = Dice(lesion_pred_post > 0, lesion > 0, 1e-5)
+
+                        _d = {
+                            "uid": uid,
+                            "iou": m_iou,
+                            "iou_post": m_iou_post,
+                            "dice": m_dice,
+                            "dice_post": m_dice_post,
+                            "acc": m_acc
+                        }
+
+                        self.archive_results(scan, None, max_norm_htp, lesion_pred, lesion_pred_post, lesion, metadata)
+                        self.scan_records = self.scan_records.append(_d, ignore_index=True)
+                        self.logger.info(f"val scan {uid}, iou:{m_iou}, iou_post:{m_iou_post}, acc:{m_acc}.")
+                        if scan_idx % 5 == 0 or scan_idx == (len(self.test_set) - 1):
+                            self.scan_records.to_csv(output_path + '/records.csv', index=False)
+                        end = time.time()
+                        self.logger.info("Finished {}, in {} seconds."
+                                         .format(scan_idx, end - start))
+                    except StopIteration:
+                        raise StopIteration
+                    except Exception:
+                        track = traceback.format_exc()
+                        self.logger.error("Cannot process {} test scans with uid {}, {}."
+                                          .format(scan_idx, uid, track))
+
+            plot_confusion_matrix_from_data(scan_cls_targets, scan_cls_preds,
+                                            labels=list(range(0, 6)), save_path=output_path + '/cm')
+            pd.DataFrame({"target": scan_cls_targets, "pred": scan_cls_preds}) \
+                .to_csv(output_path + '/lobewise.csv')
+        except StopIteration:
+            average_time /= len(self.test_set)
+            self.logger.info("Finished testing, average time = {}".format(average_time))
 

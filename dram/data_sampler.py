@@ -4,10 +4,10 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils import class_weight
 
 
-class LobeChunkCTSSSampler(Sampler):
+class LobeChunkCLESampler(Sampler):
 
     def __init__(self, logger, data_source, batch_size, balance_label_count=None):
-        super(LobeChunkCTSSSampler, self).__init__(data_source)
+        super(LobeChunkCLESampler, self).__init__(data_source)
         self.data_source = data_source
         self.batch_size = batch_size
         self.balance_label_count = balance_label_count
@@ -61,3 +61,50 @@ class LobeChunkCTSSSampler(Sampler):
 
     def __len__(self):
         return len(self.indices)
+
+
+class LobeChunkCTSSSampler(Sampler):
+
+    def __init__(self, logger, data_source, batch_size, balance_label_count=None):
+        super(LobeChunkCTSSSampler, self).__init__(data_source)
+        self.data_source = data_source
+        self.batch_size = batch_size
+        self.balance_label_count = balance_label_count
+        self.logger = logger
+        # compute lobe-wise ctss
+        self.ctsses = [int(float(self.data_source.all_metas[lobe_wise_uid]['ctss']))
+                  for lobe_wise_uid in self.data_source.uids]
+        self.logger.info("total {} instances to sample from.".format(len(self.ctsses)))
+        self.ctss_labels, self.ctss_counts = np.unique(self.ctsses, return_counts=True)
+        self.class_weights = list(class_weight.compute_class_weight('balanced',
+                                                 np.unique(self.ctsses),
+                                                 self.ctsses))
+        self.ctss_frequency_map = {cl: cw / np.sum(self.ctss_counts)
+                                   for cl, cw in zip(self.ctss_labels, self.ctss_counts)}
+        for ctss_type in range(0, 6):
+            if ctss_type not in self.ctss_labels:
+                self.class_weights.insert(ctss_type, max(self.class_weights))
+                self.ctss_frequency_map[ctss_type] = 1e-5
+        # self.ctss_frequency_map = { cl: cw for cl, cw in zip(ctss_labels, class_weights)}
+        self.logger.info("sampled CTSS distribution {}-{}.".format(self.ctss_labels, self.ctss_counts))
+        self.logger.info("ctss_frequency_map {}.".format(self.ctss_frequency_map))
+        if self.balance_label_count is None:
+            self.balance_label_count = int(np.median(self.ctss_counts))
+
+        self.total_n = self.balance_label_count * len(self.ctss_labels)
+        self.logger.info("sampling total {} samples.".format(self.total_n))
+
+        self.grouped_data = {int(label): np.where(self.ctsses == label)[0] for label in self.ctss_labels}
+
+    def __iter__(self):
+        all_sampled_indices = []
+        for n in range(self.total_n):
+            sampled_label = np.random.choice(self.ctss_labels, 1)[0]
+            group_indices = self.grouped_data[sampled_label]
+
+            sample_idx = np.random.choice(group_indices, 1)[0]
+            all_sampled_indices.append(sample_idx)
+        return iter(all_sampled_indices)
+
+    def __len__(self):
+        return self.total_n

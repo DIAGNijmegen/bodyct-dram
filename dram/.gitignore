@@ -1,0 +1,15 @@
+*.DS_Store
+
+build/
+_ext
+*.pyc
+*.pyd
+*.so
+*.dll
+*.egg-info/
+**/__pycache__/
+
+
+
+
+.idea/

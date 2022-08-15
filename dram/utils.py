@@ -14,6 +14,18 @@ import importlib.util
 import os
 import pandas as pd
 
+def read_csv_in_dict_double(csv_file_path, column_keys, fieldnames=None):
+    row_dict = {}
+    if not os.path.exists(csv_file_path):
+        return row_dict, None
+    with open(csv_file_path, "rt") as fp:
+        cr = csv.DictReader(fp, delimiter=',', fieldnames=fieldnames)
+        for row in cr:
+            row_dict[tuple([row[column_key] for column_key in column_keys])] = row
+
+        field_names = cr.fieldnames
+    return row_dict, field_names
+
 def convert_dict_string(d, i=1):
     sp = "".join(["    "] * i)
     sp0 = "".join(["    "] * (i - 1))

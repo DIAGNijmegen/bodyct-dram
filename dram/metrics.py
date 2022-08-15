@@ -121,7 +121,7 @@ class IntRegLoss():
     def get_labels(self, ctsses, lesion_ps):
         labels = []
         for ctss, lesion_p in zip(ctsses, lesion_ps):
-            lb, ub = max(0.0, lesion_p.item() - self.band_width * 2), min(1.0, lesion_p.item() + self.band_width)
+            lb, ub = max(0.0, lesion_p.item() - self.band_width), min(1.0, lesion_p.item() + self.band_width)
             ctss_lb, ctss_ub = self.ctss_ratio_map[int(float(ctss))]
             label_band = (max(ctss_lb, lb)), (min(ctss_ub, ub))
             if label_band[1] < label_band[0]:
@@ -131,14 +131,13 @@ class IntRegLoss():
                     label_band = (ctss_lb, ctss_ub)
                 else:
                     raise RuntimeError("cannot reach here!")
-            # labels.append(label_band[0] * 0.8 + label_band[1] * 0.2)
             labels.append(label_band)
 
         labels = torch.FloatTensor(labels).cuda()
         return labels
 
     def get_label(self, ctss, lesion_p):
-        lb, ub = max(0.0, lesion_p.item() - self.band_width * 2), min(1.0, lesion_p.item() + self.band_width)
+        lb, ub = max(0.0, lesion_p.item() - self.band_width), min(1.0, lesion_p.item() + self.band_width)
         ctss_lb, ctss_ub = self.ctss_ratio_map[int(float(ctss))]
         label_band = (max(ctss_lb, lb)), (min(ctss_ub, ub))
         if label_band[1] < label_band[0]:
@@ -156,9 +155,9 @@ class IntRegLoss():
         entropy_loss = ((-p * torch.log(p + 1e-7)) + (p - 1.0) * torch.log(1.0 - p + 1e-7)).mean()
         return entropy_loss
 
-    def compute_reg_loss_with_probs(self, probs, lobes, lesions, ctsses, **kwargs):
+    def compute_reg_loss_with_probs(self, probs, lobes, lesion_candidates, ctsses, **kwargs):
         B = probs.shape[0]
-        ratio_upper_bound = (lesions * lobes).view(B, 1, -1).sum(dim=-1) / lobes.view(B, 1, -1).sum(
+        ratio_upper_bound = (lesion_candidates * lobes).view(B, 1, -1).sum(dim=-1) / lobes.view(B, 1, -1).sum(
             dim=-1)
         lobe_wise_probs = probs[lobes > 0]
         n_lobe_volumes = tuple([int(pl.sum().item()) for pl in lobes])
@@ -323,23 +322,21 @@ class IntRegRefineLoss(IntRegLoss):
 
         self.bootstrap_loss = BootBinCrossEntropy(smoothing)
 
-    def threshold_postprocessing(self, pred_np, lobe_np, es_np, ctss):
-        # ref_np = np.logical_and(pred_np > 0, es_np > 0).astype(np.uint8)
-        # check if pred_np is accurate, prediction within the definition of ctss
-        cand_np = np.logical_and(pred_np > 0, es_np > 0).astype(np.uint8)
+    def threshold_postprocessing(self, pred_np, lobe_np, lesion_np, ctss):
+        cand_np = np.logical_and(pred_np > 0, lesion_np > 0).astype(np.uint8)
         if float(ctss) < 1e-7:
             cand_np = np.zeros_like(cand_np)
         return cand_np
 
     def compute_seg_loss(self, dense_outs, refined_dense_outs, images, lobes,
-                         ess, scores, metas, obj, tag='fixed'):
+                         lesions, scores, metas, obj, tag='fixed'):
         probs = F.sigmoid(dense_outs).detach()
         refine_probs = F.sigmoid(refined_dense_outs).detach()
         pseudo_refs = torch.zeros_like(lobes)
-        for idx, (dense_out, image, lobe, es, prob, refine_prob, score) \
-                in enumerate(zip(dense_outs, images, lobes, ess, probs, refine_probs, scores)):
+        for idx, (dense_out, image, lobe, lesion, prob, refine_prob, score) \
+                in enumerate(zip(dense_outs, images, lobes, lesions, probs, refine_probs, scores)):
             lobe_np = lobe.cpu().squeeze(0).numpy()
-            es_np = es.cpu().squeeze(0).numpy()
+            lesion_np = lesion.cpu().squeeze(0).numpy()
             prob_np = prob.cpu().squeeze(0).numpy()
             refine_prob_np = refine_prob.cpu().squeeze(0).numpy()
             prob_np[lobe_np == 0] = 0.0
@@ -347,7 +344,7 @@ class IntRegRefineLoss(IntRegLoss):
 
             pred_np = prob_np > 0.5
             if self.refine_method == 'th':
-                pseudo_ref = self.threshold_postprocessing(pred_np, lobe_np, es_np, score)
+                pseudo_ref = self.threshold_postprocessing(pred_np, lobe_np, lesion_np, score)
             else:
                 raise NotImplementedError(f"Do not support refine method :{self.refine_method}!")
 
